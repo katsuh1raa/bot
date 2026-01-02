@@ -4,14 +4,25 @@ import hashlib
 import requests
 import pdfplumber
 from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
 
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils.executor import start_webhook
+
+# ================== НАСТРОЙКИ ==================
 TOKEN = os.getenv("TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
 SITE_URL = "https://urgt66.ru/partition/136056/"
 CHECK_INTERVAL = 1800  # 30 минут
 
-bot = Bot(TOKEN)
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL_FULL = WEBHOOK_URL + WEBHOOK_PATH
+
+WEBAPP_HOST = "0.0.0.0"
+WEBAPP_PORT = int(os.getenv("PORT", 10000))
+# ===============================================
+
+bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
 os.makedirs("data", exist_ok=True)
@@ -22,7 +33,7 @@ USERS = set()
 
 
 def get_latest_pdf_url():
-    html = requests.get(SITE_URL).text
+    html = requests.get(SITE_URL, timeout=15).text
     soup = BeautifulSoup(html, "html.parser")
     for a in soup.find_all("a"):
         href = a.get("href", "")
@@ -44,7 +55,7 @@ async def check_updates():
                 await asyncio.sleep(CHECK_INTERVAL)
                 continue
 
-            r = requests.get(pdf_url)
+            r = requests.get(pdf_url, timeout=30)
             with open(PDF_PATH, "wb") as f:
                 f.write(r.content)
 
@@ -60,11 +71,11 @@ async def check_updates():
                     await bot.send_message(
                         user,
                         "📢 Расписание обновилось!\n"
-                        "Используй: /schedule НАЗВАНИЕ_ГРУППЫ"
+                        "Используй команду:\n"
+                        "/schedule ИС-21"
                     )
-
         except Exception as e:
-            print("Ошибка:", e)
+            print("Ошибка обновления:", e)
 
         await asyncio.sleep(CHECK_INTERVAL)
 
@@ -98,7 +109,7 @@ def get_group_schedule(group):
 async def start(msg: types.Message):
     USERS.add(msg.from_user.id)
     await msg.answer(
-        "✅ Бот запущен\n\n"
+        "✅ Бот работает 24/7\n\n"
         "📌 Команда:\n"
         "/schedule ИС-21"
     )
@@ -108,7 +119,7 @@ async def start(msg: types.Message):
 async def schedule(msg: types.Message):
     group = msg.get_args()
     if not group:
-        await msg.reply("❗️ Пример: /schedule ИС-21")
+        await msg.reply("❗ Пример: /schedule ИС-21")
         return
 
     if not os.path.exists(PDF_PATH):
@@ -122,6 +133,24 @@ async def schedule(msg: types.Message):
         await msg.reply("❌ Группа не найдена")
 
 
-if name == "__main__":
-    dp.loop.create_task(check_updates())
-    executor.start_polling(dp, skip_updates=True)
+async def on_startup(dp):
+    await bot.set_webhook(WEBHOOK_URL_FULL)
+    asyncio.create_task(check_updates())
+    print("Bot started")
+
+
+async def on_shutdown(dp):
+    await bot.delete_webhook()
+    print("Bot stopped")
+
+
+if __name__ == "__main__":
+    start_webhook(
+        dispatcher=dp,
+        webhook_path=WEBHOOK_PATH,
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        skip_updates=True,
+        host=WEBAPP_HOST,
+        port=WEBAPP_PORT,
+    )
