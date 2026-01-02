@@ -162,3 +162,4 @@ async def remove_user(msg: types.Message):
 if __name__ == "__main__":
     dp.loop.create_task(checker())
     executor.start_polling(dp, skip_updates=True)
+
