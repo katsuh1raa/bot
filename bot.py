@@ -1,127 +1,108 @@
 import os
 import asyncio
 import hashlib
-import aiohttp
-import json
+import requests
+from bs4 import BeautifulSoup
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
 
-from aiogram import Bot, Dispatcher, executor, types
+# ===== НАСТРОЙКИ =====
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SITE_URL = "https://urgt66.ru/partition/136056/"
+CHECK_INTERVAL = 1800  # 30 минут
 
-TOKEN = os.getenv("TOKEN")
-if not TOKEN:
-    raise RuntimeError("TOKEN not set")
+DATA_DIR = "data"
+PDF_PATH = f"{DATA_DIR}/schedule.pdf"
+HASH_PATH = f"{DATA_DIR}/hash.txt"
 
-PDF_URL = "https://example.com/schedule.pdf"  # ← ЗАМЕНИ
-CHECK_INTERVAL = 60  # секунд
+os.makedirs(DATA_DIR, exist_ok=True)
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
-USERS_FILE = "users.json"
-LAST_PDF_FILE = "last_schedule.pdf"
-
-last_hash = None
+USERS = set()
 
 
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        return set()
-    with open(USERS_FILE, "r") as f:
-        return set(json.load(f))
+# ===== ВСПОМОГАТЕЛЬНОЕ =====
+def get_latest_pdf_url():
+    html = requests.get(SITE_URL, timeout=15).text
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a"):
+        href = a.get("href", "")
+        if href.endswith(".pdf"):
+            return "https://urgt66.ru" + href
+    return None
 
 
-def save_users(users: set):
-    with open(USERS_FILE, "w") as f:
-        json.dump(list(users), f)
+def file_hash(path):
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
 
 
-users = load_users()
+def download_pdf(url):
+    r = requests.get(url, timeout=30)
+    with open(PDF_PATH, "wb") as f:
+        f.write(r.content)
 
 
-@dp.message_handler(commands=["start"])
-async def start(message: types.Message):
-    users.add(message.chat.id)
-    save_users(users)
-    await message.answer(
-        "✅ Ты подписан на обновления расписания\n\n"
-        "📎 Команды:\n"
-        "/last — последнее расписание"
-    )
-
-
-@dp.message_handler(commands=["last"])
-async def last_schedule(message: types.Message):
-    if not os.path.exists(LAST_PDF_FILE):
-        await message.answer("❌ Расписание ещё не загружалось")
-        return
-
-    await message.answer_document(
-        types.InputFile(LAST_PDF_FILE),
-        caption="📅 Последнее актуальное расписание"
-    )
-
-
-async def download_pdf():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(PDF_URL) as resp:
-            if resp.status != 200:
-                return None
-            return await resp.read()
-
-
-def get_hash(data: bytes):
-    return hashlib.md5(data).hexdigest()
-
-
-async def check_schedule():
-    global last_hash
-
-    await asyncio.sleep(5)
-
+# ===== ПРОВЕРКА ОБНОВЛЕНИЙ =====
+async def check_updates():
+    await asyncio.sleep(10)  # даём боту стартануть
     while True:
         try:
-            pdf_data = await download_pdf()
-            if not pdf_data:
+            pdf_url = get_latest_pdf_url()
+            if not pdf_url:
                 await asyncio.sleep(CHECK_INTERVAL)
                 continue
 
-            current_hash = get_hash(pdf_data)
+            download_pdf(pdf_url)
+            new_hash = file_hash(PDF_PATH)
 
-            if current_hash != last_hash:
-                last_hash = current_hash
+            old_hash = ""
+            if os.path.exists(HASH_PATH):
+                with open(HASH_PATH) as f:
+                    old_hash = f.read()
 
-                with open(LAST_PDF_FILE, "wb") as f:
-                    f.write(pdf_data)
+            if new_hash != old_hash:
+                with open(HASH_PATH, "w") as f:
+                    f.write(new_hash)
 
-                for uid in list(users):
-                    try:
-                        await bot.send_document(
-                            uid,
-                            types.InputFile(LAST_PDF_FILE),
-                            caption="📢 Обновлённое расписание"
-                        )
-                    except Exception as e:
-                        print(f"Не удалось отправить {uid}: {e}")
+                for user in USERS:
+                    await bot.send_document(
+                        user,
+                        open(PDF_PATH, "rb"),
+                        caption="📢 Обновлённое расписание"
+                    )
 
         except Exception as e:
-            print("Ошибка:", e)
+            print("Ошибка проверки:", e)
 
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-async def on_startup(dp):
-    asyncio.create_task(check_schedule())
+# ===== КОМАНДЫ =====
+@dp.message_handler(commands=["start"])
+async def start(msg: types.Message):
+    USERS.add(msg.from_user.id)
+    await msg.answer(
+        "✅ Ты подписан на обновления расписаний\n\n"
+        "📄 /last — последнее расписание"
+    )
 
 
+@dp.message_handler(commands=["last"])
+async def last(msg: types.Message):
+    if not os.path.exists(PDF_PATH):
+        await msg.answer("⏳ Расписание ещё не загружено")
+        return
+
+    await msg.answer_document(
+        open(PDF_PATH, "rb"),
+        caption="📄 Последнее расписание"
+    )
+
+
+# ===== ЗАПУСК =====
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
-    from aiohttp import web
-import threading
-
-def run_web():
-    app = web.Application()
-    app.router.add_get("/", lambda request: web.Response(text="OK"))
-    web.run_app(app, port=int(os.getenv("PORT", 10000)))
-
-threading.Thread(target=run_web).start()
-
-
+    dp.loop.create_task(check_updates())
+    executor.start_polling(dp, skip_updates=True)
