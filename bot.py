@@ -1,108 +1,84 @@
-import os
 import asyncio
 import hashlib
-import requests
-from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+import os
+import aiohttp
+from aiogram import Bot, Dispatcher, executor, types
 
-# ===== НАСТРОЙКИ =====
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SITE_URL = "https://urgt66.ru/partition/136056/"
-CHECK_INTERVAL = 1800  # 30 минут
+# ================= НАСТРОЙКИ =================
+TOKEN = os.getenv("BOT_TOKEN")  # ОБЯЗАТЕЛЬНО в Railway
+PDF_URL = "https://example.com/schedule.pdf"  # <-- СЮДА ССЫЛКУ НА PDF
+CHECK_INTERVAL = 300  # проверка каждые 5 минут
+# ============================================
 
-DATA_DIR = "data"
-PDF_PATH = f"{DATA_DIR}/schedule.pdf"
-HASH_PATH = f"{DATA_DIR}/hash.txt"
-
-os.makedirs(DATA_DIR, exist_ok=True)
-
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-USERS = set()
+USERS_FILE = "users.txt"
+HASH_FILE = "last_hash.txt"
+PDF_FILE = "schedule.pdf"
 
 
-# ===== ВСПОМОГАТЕЛЬНОЕ =====
-def get_latest_pdf_url():
-    html = requests.get(SITE_URL, timeout=15).text
-    soup = BeautifulSoup(html, "html.parser")
-    for a in soup.find_all("a"):
-        href = a.get("href", "")
-        if href.endswith(".pdf"):
-            return "https://urgt66.ru" + href
-    return None
+# ---------- Пользователи ----------
+def get_users():
+    if not os.path.exists(USERS_FILE):
+        return []
+    with open(USERS_FILE) as f:
+        return [int(x) for x in f.read().splitlines() if x.strip()]
 
 
-def file_hash(path):
-    with open(path, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
+def add_user(user_id: int):
+    users = get_users()
+    if user_id not in users:
+        with open(USERS_FILE, "a") as f:
+            f.write(f"{user_id}\n")
 
 
-def download_pdf(url):
-    r = requests.get(url, timeout=30)
-    with open(PDF_PATH, "wb") as f:
-        f.write(r.content)
+# ---------- PDF ----------
+async def download_pdf():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(PDF_URL) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.read()
+            with open(PDF_FILE, "wb") as f:
+                f.write(data)
+            return data
 
 
-# ===== ПРОВЕРКА ОБНОВЛЕНИЙ =====
-async def check_updates():
-    await asyncio.sleep(10)  # даём боту стартануть
+def get_hash(data: bytes):
+    return hashlib.md5(data).hexdigest()
+
+
+def load_last_hash():
+    if not os.path.exists(HASH_FILE):
+        return None
+    with open(HASH_FILE) as f:
+        return f.read().strip()
+
+
+def save_hash(h: str):
+    with open(HASH_FILE, "w") as f:
+        f.write(h)
+
+
+# ---------- Рассылка ----------
+async def send_pdf_to_all():
+    users = get_users()
+    for uid in users:
+        try:
+            await bot.send_document(uid, types.InputFile(PDF_FILE))
+        except:
+            pass
+
+
+# ---------- Проверка обновлений ----------
+async def checker():
+    await asyncio.sleep(10)
     while True:
         try:
-            pdf_url = get_latest_pdf_url()
-            if not pdf_url:
-                await asyncio.sleep(CHECK_INTERVAL)
-                continue
+            data = await download_pdf()
+            if data:
+                new_hash = get_hash(data)
+                old_hash = load_last_hash()
 
-            download_pdf(pdf_url)
-            new_hash = file_hash(PDF_PATH)
-
-            old_hash = ""
-            if os.path.exists(HASH_PATH):
-                with open(HASH_PATH) as f:
-                    old_hash = f.read()
-
-            if new_hash != old_hash:
-                with open(HASH_PATH, "w") as f:
-                    f.write(new_hash)
-
-                for user in USERS:
-                    await bot.send_document(
-                        user,
-                        open(PDF_PATH, "rb"),
-                        caption="📢 Обновлённое расписание"
-                    )
-
-        except Exception as e:
-            print("Ошибка проверки:", e)
-
-        await asyncio.sleep(CHECK_INTERVAL)
-
-
-# ===== КОМАНДЫ =====
-@dp.message_handler(commands=["start"])
-async def start(msg: types.Message):
-    USERS.add(msg.from_user.id)
-    await msg.answer(
-        "✅ Ты подписан на обновления расписаний\n\n"
-        "📄 /last — последнее расписание"
-    )
-
-
-@dp.message_handler(commands=["last"])
-async def last(msg: types.Message):
-    if not os.path.exists(PDF_PATH):
-        await msg.answer("⏳ Расписание ещё не загружено")
-        return
-
-    await msg.answer_document(
-        open(PDF_PATH, "rb"),
-        caption="📄 Последнее расписание"
-    )
-
-
-# ===== ЗАПУСК =====
-if __name__ == "__main__":
-    dp.loop.create_task(check_updates())
-    executor.start_polling(dp, skip_updates=True)
+                if new_h_
