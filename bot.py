@@ -1,106 +1,67 @@
 import os
+import asyncio
 import hashlib
-import requests
-import pdfplumber
-from datetime import datetime
-from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+import aiohttp
 
-TOKEN = os.environ.get("TOKEN")
-if not TOKEN:
-    raise RuntimeError("TOKEN not set")
+from aiogram import Bot, Dispatcher, executor
 
-SITE_URL = "https://urgt66.ru/partition/136056/"
-DATA_DIR = "data"
-PDF_PATH = f"{DATA_DIR}/schedule.pdf"
-HASH_PATH = f"{DATA_DIR}/hash.txt"
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 
-os.makedirs(DATA_DIR, exist_ok=True)
+SCHEDULE_URL = "https://example.com/schedule.pdf"  # ← ЗАМЕНИ
+CHECK_INTERVAL = 30  # секунд
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-
-def get_latest_pdf_url():
-    r = requests.get(SITE_URL, timeout=15)
-    soup = BeautifulSoup(r.text, "html.parser")
-    for a in soup.find_all("a"):
-        href = a.get("href", "")
-        if href.endswith(".pdf"):
-            return "https://urgt66.ru" + href
-    return None
+last_file_hash = None
 
 
-def file_hash(path):
-    with open(path, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
+async def download_file():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(SCHEDULE_URL) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.read()
 
 
-def update_pdf():
-    url = get_latest_pdf_url()
-    if not url:
-        return False
-
-    r = requests.get(url, timeout=20)
-    with open(PDF_PATH, "wb") as f:
-        f.write(r.content)
-
-    new_hash = file_hash(PDF_PATH)
-    old_hash = open(HASH_PATH).read() if os.path.exists(HASH_PATH) else ""
-
-    if new_hash != old_hash:
-        with open(HASH_PATH, "w") as f:
-            f.write(new_hash)
-        return True
-
-    return False
+def get_hash(data: bytes):
+    return hashlib.sha256(data).hexdigest()
 
 
-def today_schedule(group="ИС-21"):
-    if not os.path.exists(PDF_PATH):
-        return "⏳ Расписание ещё не загружено"
+async def watch_schedule():
+    global last_file_hash
 
-    text = ""
-    with pdfplumber.open(PDF_PATH) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text()
-            if t:
-                text += t + "\n"
+    await asyncio.sleep(5)
 
-    lines = text.split("\n")
-    result = []
-    collect = False
+    while True:
+        try:
+            data = await download_file()
+            if not data:
+                await asyncio.sleep(CHECK_INTERVAL)
+                continue
 
-    for line in lines:
-        if group in line:
-            collect = True
-            result.append(line)
-            continue
-        if collect and not line.strip():
-            break
-        if collect:
-            result.append(line)
+            file_hash = get_hash(data)
 
-    if not result:
-        return "❌ Группа не найдена"
+            if file_hash != last_file_hash:
+                last_file_hash = file_hash
 
-    return f"📘 Расписание {group}:\n\n" + "\n".join(result)
+                filename = "schedule"
+                await bot.send_document(
+                    CHAT_ID,
+                    ("schedule.pdf", data),
+                    caption="🔄 Обновлённое расписание"
+                )
 
+        except Exception as e:
+            print("Ошибка:", e)
 
-@dp.message_handler(commands=["start"])
-async def start(msg: types.Message):
-    update_pdf()
-    await msg.answer(today_schedule())
+        await asyncio.sleep(CHECK_INTERVAL)
 
 
-@dp.message_handler(commands=["schedule"])
-async def schedule(msg: types.Message):
-    group = msg.get_args() or "ИС-21"
-    update_pdf()
-    await msg.answer(today_schedule(group))
+async def on_startup(dp):
+    asyncio.create_task(watch_schedule())
 
 
 if __name__ == "__main__":
-    print("BOT STARTED")
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
