@@ -114,3 +114,14 @@ async def on_startup(dp):
 
 if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    from aiohttp import web
+import threading
+
+def run_web():
+    app = web.Application()
+    app.router.add_get("/", lambda request: web.Response(text="OK"))
+    web.run_app(app, port=int(os.getenv("PORT", 10000)))
+
+threading.Thread(target=run_web).start()
+
+
