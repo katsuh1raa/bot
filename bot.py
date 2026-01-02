@@ -1,189 +1,164 @@
+import os
 import asyncio
 import hashlib
-import os
-import aiohttp
-from aiogram import Bot, Dispatcher, executor, types
+import requests
+from datetime import datetime
+from bs4 import BeautifulSoup
 
-TOKEN = os.getenv("BOT_TOKEN")
-PDF_URL = "https://example.com/schedule.pdf"  # <-- ТВОЙ PDF
-CHECK_INTERVAL = 300
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-ADMINS = [7028713990]  # <-- ТВОЙ TELEGRAM ID
+# ================== НАСТРОЙКИ ==================
+
+TOKEN = "8391667886:AAGZOemUTi_8EUnqFh65WxKfjK1SyeizAdk"
+ADMIN_ID = 7028713990
+
+SITE_URL = "https://urgt66.ru/partition/136056/"
+CHECK_INTERVAL = 1800  # 30 минут
+
+DATA_DIR = "data"
+PDF_PATH = f"{DATA_DIR}/schedule.pdf"
+HASH_PATH = f"{DATA_DIR}/hash.txt"
+USERS_PATH = f"{DATA_DIR}/users.txt"
+HISTORY_DIR = f"{DATA_DIR}/history"
+
+os.makedirs(HISTORY_DIR, exist_ok=True)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-USERS_FILE = "users.txt"
-BANNED_FILE = "banned.txt"
-HASH_FILE = "last_hash.txt"
-PDF_FILE = "schedule.pdf"
+# ================== ПОЛЬЗОВАТЕЛИ ==================
 
+def load_users():
+    if not os.path.exists(USERS_PATH):
+        return set()
+    with open(USERS_PATH, "r") as f:
+        return set(map(int, f.read().splitlines()))
 
-# --------- Utils ----------
-def read_ids(file):
-    if not os.path.exists(file):
-        return []
-    with open(file) as f:
-        return [int(x) for x in f.read().splitlines() if x.strip()]
+def save_users():
+    with open(USERS_PATH, "w") as f:
+        for u in USERS:
+            f.write(f"{u}\n")
 
+USERS = load_users()
 
-def write_id(file, uid):
-    ids = read_ids(file)
-    if uid not in ids:
-        with open(file, "a") as f:
-            f.write(f"{uid}\n")
+# ================== PDF ==================
 
+def get_latest_pdf_url():
+    html = requests.get(SITE_URL, timeout=15).text
+    soup = BeautifulSoup(html, "html.parser")
 
-def is_admin(uid):
-    return uid in ADMINS
+    pdfs = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.endswith(".pdf"):
+            pdfs.append("https://urgt66.ru" + href)
 
+    return pdfs[-1] if pdfs else None
 
-# --------- PDF ----------
-async def download_pdf():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(PDF_URL) as r:
-            if r.status != 200:
-                return None
-            data = await r.read()
-            with open(PDF_FILE, "wb") as f:
-                f.write(data)
-            return data
+def get_hash(path):
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
 
-
-def md5(data):
-    return hashlib.md5(data).hexdigest()
-
-
-def load_hash():
-    return open(HASH_FILE).read().strip() if os.path.exists(HASH_FILE) else None
-
-
-def save_hash(h):
-    with open(HASH_FILE, "w") as f:
-        f.write(h)
-
-
-# --------- Broadcast ----------
-async def send_pdf(users):
-    for uid in users:
+async def send_pdf_to_all(caption):
+    for uid in USERS.copy():
         try:
-            await bot.send_document(uid, types.InputFile(PDF_FILE))
+            await bot.send_document(uid, open(PDF_PATH, "rb"), caption=caption)
         except:
-            pass
+            USERS.discard(uid)
+    save_users()
 
+async def check_once(startup=False):
+    pdf_url = get_latest_pdf_url()
+    if not pdf_url:
+        return
 
-# --------- Checker ----------
+    r = requests.get(pdf_url, timeout=20)
+    with open(PDF_PATH, "wb") as f:
+        f.write(r.content)
+
+    new_hash = get_hash(PDF_PATH)
+    old_hash = open(HASH_PATH).read() if os.path.exists(HASH_PATH) else ""
+
+    if new_hash != old_hash or startup:
+        with open(HASH_PATH, "w") as f:
+            f.write(new_hash)
+
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        hist = f"{HISTORY_DIR}/schedule_{ts}.pdf"
+        with open(hist, "wb") as f:
+            f.write(r.content)
+
+        await send_pdf_to_all("📘 Актуальное расписание")
+
+# ================== ФОН ==================
+
 async def checker():
-    await asyncio.sleep(10)
+    await check_once(startup=True)
     while True:
-        try:
-            data = await download_pdf()
-            if data:
-                new = md5(data)
-                old = load_hash()
-                if new != old:
-                    save_hash(new)
-                    await send_pdf(read_ids(USERS_FILE))
-        except:
-            pass
+        await check_once()
         await asyncio.sleep(CHECK_INTERVAL)
 
+# ================== АДМИН ==================
 
-# --------- User ----------
-@dp.message_handler(commands=["start"])
-async def start(msg: types.Message):
-    if msg.from_user.id in read_ids(BANNED_FILE):
-        return
-    write_id(USERS_FILE, msg.from_user.id)
-    await msg.answer(
-        "✅ Ты подписан на обновления расписания\n"
-        "📄 /last — последнее расписание"
+def admin_kb():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton("📤 Разослать PDF", callback_data="send"),
+        InlineKeyboardButton("🔄 Проверить сайт", callback_data="check"),
+        InlineKeyboardButton("👥 Пользователи", callback_data="users"),
+        InlineKeyboardButton("🗑 Удалить пользователя", callback_data="remove"),
+        InlineKeyboardButton("📚 История PDF", callback_data="history"),
     )
-
-
-@dp.message_handler(commands=["last"])
-async def last(msg: types.Message):
-    if os.path.exists(PDF_FILE):
-        await msg.answer_document(types.InputFile(PDF_FILE))
-    else:
-        await msg.answer("Расписание ещё не загружено")
-
-
-# ================= АДМИНКА =================
+    return kb
 
 @dp.message_handler(commands=["admin"])
 async def admin(msg: types.Message):
-    if not is_admin(msg.from_user.id):
+    if msg.from_user.id == ADMIN_ID:
+        await msg.answer("🛠 Админ-панель", reply_markup=admin_kb())
+
+@dp.callback_query_handler(lambda c: c.from_user.id == ADMIN_ID)
+async def admin_buttons(c: types.CallbackQuery):
+    if c.data == "send":
+        await send_pdf_to_all("📘 Расписание (вручную)")
+        await c.message.answer("✅ Отправлено")
+
+    elif c.data == "check":
+        await check_once()
+        await c.message.answer("✅ Проверено")
+
+    elif c.data == "users":
+        await c.message.answer("👥 Пользователи:\n" + "\n".join(map(str, USERS)))
+
+    elif c.data == "remove":
+        await c.message.answer("✏️ Отправь ID пользователя")
+
+    elif c.data == "history":
+        files = sorted(os.listdir(HISTORY_DIR))[-5:]
+        for f in files:
+            await bot.send_document(ADMIN_ID, open(f"{HISTORY_DIR}/{f}", "rb"))
+
+# ================== ПОЛЬЗОВАТЕЛИ ==================
+
+@dp.message_handler(commands=["start"])
+async def start(msg: types.Message):
+    USERS.add(msg.from_user.id)
+    save_users()
+    await msg.answer("✅ Ты подписан на обновления расписания")
+
+@dp.message_handler(lambda m: m.text.isdigit())
+async def remove_user(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
         return
-    await msg.answer(
-        "🛠 Админ-панель\n\n"
-        "/users — пользователи\n"
-        "/send — разослать PDF\n"
-        "/update — обновить и разослать\n"
-        "/ban ID\n"
-        "/unban ID"
-    )
+    uid = int(msg.text)
+    if uid in USERS:
+        USERS.remove(uid)
+        save_users()
+        await msg.answer("✅ Пользователь удалён")
 
+# ================== ЗАПУСК ==================
 
-@dp.message_handler(commands=["users"])
-async def users(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return
-    users = read_ids(USERS_FILE)
-    await msg.answer(f"👥 Пользователей: {len(users)}")
-
-
-@dp.message_handler(commands=["send"])
-async def send(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return
-    await send_pdf(read_ids(USERS_FILE))
-    await msg.answer("✅ Рассылка выполнена")
-
-
-@dp.message_handler(commands=["update"])
-async def update(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return
-    data = await download_pdf()
-    if data:
-        save_hash(md5(data))
-        await send_pdf(read_ids(USERS_FILE))
-        await msg.answer("🔄 Обновлено и разослано")
-
-
-@dp.message_handler(commands=["ban"])
-async def ban(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return
-    try:
-        uid = int(msg.text.split()[1])
-        write_id(BANNED_FILE, uid)
-        await msg.answer(f"🚫 Забанен {uid}")
-    except:
-        await msg.answer("❌ Используй: /ban ID")
-
-
-@dp.message_handler(commands=["unban"])
-async def unban(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return
-    try:
-        uid = int(msg.text.split()[1])
-        ids = read_ids(BANNED_FILE)
-        ids.remove(uid)
-        with open(BANNED_FILE, "w") as f:
-            for i in ids:
-                f.write(f"{i}\n")
-        await msg.answer(f"✅ Разбанен {uid}")
-    except:
-        await msg.answer("❌ Ошибка")
-
-
-# --------- Start ----------
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(checker())
+    dp.loop.create_task(checker())
     executor.start_polling(dp, skip_updates=True)
-
-
