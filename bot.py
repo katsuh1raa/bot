@@ -1,156 +1,72 @@
 import os
-import asyncio
-import hashlib
-import requests
-import pdfplumber
-from bs4 import BeautifulSoup
-
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types
-from aiogram.utils.executor import start_webhook
+from aiogram.utils import executor
 
-# ================== НАСТРОЙКИ ==================
 TOKEN = os.getenv("TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-SITE_URL = "https://urgt66.ru/partition/136056/"
-CHECK_INTERVAL = 1800  # 30 минут
-
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL_FULL = WEBHOOK_URL + WEBHOOK_PATH
-
-WEBAPP_HOST = "0.0.0.0"
-WEBAPP_PORT = int(os.getenv("PORT", 10000))
-# ===============================================
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-os.makedirs("data", exist_ok=True)
-PDF_PATH = "data/schedule.pdf"
-HASH_PATH = "data/hash.txt"
-
-USERS = set()
-
-
-def get_latest_pdf_url():
-    html = requests.get(SITE_URL, timeout=15).text
-    soup = BeautifulSoup(html, "html.parser")
-    for a in soup.find_all("a"):
-        href = a.get("href", "")
-        if href.endswith(".pdf"):
-            return "https://urgt66.ru" + href
-    return None
+DAYS = {
+    "понедельник": 0,
+    "вторник": 1,
+    "среда": 2,
+    "четверг": 3,
+    "пятница": 4,
+    "суббота": 5,
+    "воскресенье": 6,
+}
 
 
-def get_hash(path):
-    with open(path, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
+def load_schedule():
+    schedule = {i: [] for i in range(7)}
+    current_day = None
 
+    with open("schedule.txt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
 
-async def check_updates():
-    while True:
-        try:
-            pdf_url = get_latest_pdf_url()
-            if not pdf_url:
-                await asyncio.sleep(CHECK_INTERVAL)
+            if not line:
                 continue
 
-            r = requests.get(pdf_url, timeout=30)
-            with open(PDF_PATH, "wb") as f:
-                f.write(r.content)
+            if line.startswith("#"):
+                day_name = line[1:].strip().lower()
+                current_day = DAYS.get(day_name)
+                continue
 
-            new_hash = get_hash(PDF_PATH)
-            old_hash = ""
+            if current_day is not None and "|" in line:
+                time, subject = line.split("|", 1)
+                schedule[current_day].append((time.strip(), subject.strip()))
 
-            if os.path.exists(HASH_PATH):
-                old_hash = open(HASH_PATH).read()
-
-            if new_hash != old_hash:
-                open(HASH_PATH, "w").write(new_hash)
-                for user in USERS:
-                    await bot.send_message(
-                        user,
-                        "📢 Расписание обновилось!\n"
-                        "Используй команду:\n"
-                        "/schedule ИС-21"
-                    )
-        except Exception as e:
-            print("Ошибка обновления:", e)
-
-        await asyncio.sleep(CHECK_INTERVAL)
+    return schedule
 
 
-def get_group_schedule(group):
-    text = ""
-    with pdfplumber.open(PDF_PATH) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text()
-            if t:
-                text += t + "\n"
+SCHEDULE = load_schedule()
 
-    lines = text.split("\n")
-    result = []
-    collecting = False
 
-    for line in lines:
-        if group in line:
-            collecting = True
-            result.append(line)
-            continue
-        if collecting:
-            if line.strip() == "":
-                break
-            result.append(line)
+def get_today_schedule():
+    today = datetime.now().weekday()
+    lessons = SCHEDULE.get(today, [])
 
-    return "\n".join(result)
+    if not lessons:
+        return "📭 *Сегодня занятий нет*"
+
+    text = "📅 *Актуальное расписание на сегодня:*\n\n"
+    for time, subject in lessons:
+        text += f"🕒 {time} — {subject}\n"
+
+    return text
 
 
 @dp.message_handler(commands=["start"])
-async def start(msg: types.Message):
-    USERS.add(msg.from_user.id)
-    await msg.answer(
-        "✅ Бот работает 24/7\n\n"
-        "📌 Команда:\n"
-        "/schedule ИС-21"
+async def start_handler(message: types.Message):
+    await message.answer(
+        "👋 Привет!\n\n" + get_today_schedule(),
+        parse_mode="Markdown"
     )
-
-
-@dp.message_handler(commands=["schedule"])
-async def schedule(msg: types.Message):
-    group = msg.get_args()
-    if not group:
-        await msg.reply("❗ Пример: /schedule ИС-21")
-        return
-
-    if not os.path.exists(PDF_PATH):
-        await msg.reply("⏳ Расписание ещё не загружено")
-        return
-
-    result = get_group_schedule(group)
-    if result:
-        await msg.reply(f"📘 {group}:\n\n{result}")
-    else:
-        await msg.reply("❌ Группа не найдена")
-
-
-async def on_startup(dp):
-    await bot.set_webhook(WEBHOOK_URL_FULL)
-    asyncio.create_task(check_updates())
-    print("Bot started")
-
-
-async def on_shutdown(dp):
-    await bot.delete_webhook()
-    print("Bot stopped")
 
 
 if __name__ == "__main__":
-    start_webhook(
-        dispatcher=dp,
-        webhook_path=WEBHOOK_PATH,
-        on_startup=on_startup,
-        on_shutdown=on_shutdown,
-        skip_updates=True,
-        host=WEBAPP_HOST,
-        port=WEBAPP_PORT,
-    )
+    print("Bot started")
+    executor.start_polling(dp, skip_updates=True)
