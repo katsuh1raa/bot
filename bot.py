@@ -17,6 +17,8 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
 USERS_FILE = "users.json"
+LAST_PDF_FILE = "last_schedule.pdf"
+
 last_hash = None
 
 
@@ -39,7 +41,23 @@ users = load_users()
 async def start(message: types.Message):
     users.add(message.chat.id)
     save_users(users)
-    await message.answer("✅ Ты подписан на обновления расписания")
+    await message.answer(
+        "✅ Ты подписан на обновления расписания\n\n"
+        "📎 Команды:\n"
+        "/last — последнее расписание"
+    )
+
+
+@dp.message_handler(commands=["last"])
+async def last_schedule(message: types.Message):
+    if not os.path.exists(LAST_PDF_FILE):
+        await message.answer("❌ Расписание ещё не загружалось")
+        return
+
+    await message.answer_document(
+        types.InputFile(LAST_PDF_FILE),
+        caption="📅 Последнее актуальное расписание"
+    )
 
 
 async def download_pdf():
@@ -71,11 +89,14 @@ async def check_schedule():
             if current_hash != last_hash:
                 last_hash = current_hash
 
+                with open(LAST_PDF_FILE, "wb") as f:
+                    f.write(pdf_data)
+
                 for uid in list(users):
                     try:
                         await bot.send_document(
                             uid,
-                            ("schedule.pdf", pdf_data),
+                            types.InputFile(LAST_PDF_FILE),
                             caption="📢 Обновлённое расписание"
                         )
                     except Exception as e:
