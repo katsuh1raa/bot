@@ -8,7 +8,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 PDF_URL = "https://example.com/schedule.pdf"  # <-- ТВОЙ PDF
 CHECK_INTERVAL = 300
 
-ADMINS = [123456789]  # <-- ТВОЙ TELEGRAM ID
+ADMINS = [7028713990]  # <-- ТВОЙ TELEGRAM ID
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
@@ -185,4 +185,5 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(checker())
     executor.start_polling(dp, skip_updates=True)
+
 
