@@ -1,165 +1,160 @@
-import os
 import asyncio
+import os
 import hashlib
 import requests
-from datetime import datetime
 from bs4 import BeautifulSoup
-
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ================== НАСТРОЙКИ ==================
-
+# ================= НАСТРОЙКИ =================
 TOKEN = "8391667886:AAGZOemUTi_8EUnqFh65WxKfjK1SyeizAdk"
 ADMIN_ID = 7028713990
 
-SITE_URL = "https://urgt66.ru/partition/136056/"
-CHECK_INTERVAL = 1800  # 30 минут
+CHECK_INTERVAL = 300  # 5 минут
+BASE_URL = "https://urgt66.ru"
+PAGE_URL = "https://urgt66.ru/partition/136056/"
 
-DATA_DIR = "data"
-PDF_PATH = f"{DATA_DIR}/schedule.pdf"
-HASH_PATH = f"{DATA_DIR}/hash.txt"
-USERS_PATH = f"{DATA_DIR}/users.txt"
-HISTORY_DIR = f"{DATA_DIR}/history"
+PDF_DIR = "pdf"
+os.makedirs(PDF_DIR, exist_ok=True)
 
-os.makedirs(HISTORY_DIR, exist_ok=True)
+# =============================================
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-# ================== ПОЛЬЗОВАТЕЛИ ==================
+subscribers = set()
+pdf_history = []
+last_hash = None
 
-def load_users():
-    if not os.path.exists(USERS_PATH):
-        return set()
-    with open(USERS_PATH, "r") as f:
-        return set(map(int, f.read().splitlines()))
 
-def save_users():
-    with open(USERS_PATH, "w") as f:
-        for u in USERS:
-            f.write(f"{u}\n")
+def get_latest_pdf():
+    r = requests.get(PAGE_URL, timeout=15)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-USERS = load_users()
-
-# ================== PDF ==================
-
-def get_latest_pdf_url():
-    html = requests.get(SITE_URL, timeout=15).text
-    soup = BeautifulSoup(html, "html.parser")
-
-    pdfs = []
+    links = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if href.endswith(".pdf"):
-            pdfs.append("https://urgt66.ru" + href)
+        if href.lower().endswith(".pdf"):
+            links.append(BASE_URL + href)
 
-    return pdfs[-1] if pdfs else None
+    if not links:
+        return None
 
-def get_hash(path):
-    with open(path, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
+    return links[0]  # на сайте последний — первый
 
-async def send_pdf_to_all(caption):
-    for uid in USERS.copy():
-        try:
-            await bot.send_document(uid, open(PDF_PATH, "rb"), caption=caption)
-        except:
-            USERS.discard(uid)
-    save_users()
 
-async def check_once(startup=False):
-    pdf_url = get_latest_pdf_url()
-    if not pdf_url:
-        return
+def download_pdf(url):
+    filename = url.split("/")[-1]
+    path = os.path.join(PDF_DIR, filename)
 
-    r = requests.get(pdf_url, timeout=20)
-    with open(PDF_PATH, "wb") as f:
+    r = requests.get(url, timeout=20)
+    with open(path, "wb") as f:
         f.write(r.content)
 
-    new_hash = get_hash(PDF_PATH)
-    old_hash = open(HASH_PATH).read() if os.path.exists(HASH_PATH) else ""
+    h = hashlib.md5(r.content).hexdigest()
+    return path, h
 
-    if new_hash != old_hash or startup:
-        with open(HASH_PATH, "w") as f:
-            f.write(new_hash)
 
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        hist = f"{HISTORY_DIR}/schedule_{ts}.pdf"
-        with open(hist, "wb") as f:
-            f.write(r.content)
+async def send_pdf_to_all(path):
+    for uid in subscribers:
+        try:
+            await bot.send_document(uid, open(path, "rb"))
+        except:
+            pass
 
-        await send_pdf_to_all("📘 Актуальное расписание")
-
-# ================== ФОН ==================
 
 async def checker():
-    await check_once(startup=True)
+    global last_hash
+
     while True:
-        await check_once()
+        try:
+            url = get_latest_pdf()
+            if not url:
+                await asyncio.sleep(CHECK_INTERVAL)
+                continue
+
+            path, h = download_pdf(url)
+
+            if h != last_hash:
+                last_hash = h
+                pdf_history.append(path)
+                await send_pdf_to_all(path)
+
+        except Exception as e:
+            print("ERROR:", e)
+
         await asyncio.sleep(CHECK_INTERVAL)
 
-# ================== АДМИН ==================
 
-def admin_kb():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("📤 Разослать PDF", callback_data="send"),
-        InlineKeyboardButton("🔄 Проверить сайт", callback_data="check"),
-        InlineKeyboardButton("👥 Пользователи", callback_data="users"),
-        InlineKeyboardButton("🗑 Удалить пользователя", callback_data="remove"),
-        InlineKeyboardButton("📚 История PDF", callback_data="history"),
-    )
-    return kb
-
-@dp.message_handler(commands=["admin"])
-async def admin(msg: types.Message):
-    if msg.from_user.id == ADMIN_ID:
-        await msg.answer("🛠 Админ-панель", reply_markup=admin_kb())
-
-@dp.callback_query_handler(lambda c: c.from_user.id == ADMIN_ID)
-async def admin_buttons(c: types.CallbackQuery):
-    if c.data == "send":
-        await send_pdf_to_all("📘 Расписание (вручную)")
-        await c.message.answer("✅ Отправлено")
-
-    elif c.data == "check":
-        await check_once()
-        await c.message.answer("✅ Проверено")
-
-    elif c.data == "users":
-        await c.message.answer("👥 Пользователи:\n" + "\n".join(map(str, USERS)))
-
-    elif c.data == "remove":
-        await c.message.answer("✏️ Отправь ID пользователя")
-
-    elif c.data == "history":
-        files = sorted(os.listdir(HISTORY_DIR))[-5:]
-        for f in files:
-            await bot.send_document(ADMIN_ID, open(f"{HISTORY_DIR}/{f}", "rb"))
-
-# ================== ПОЛЬЗОВАТЕЛИ ==================
+# ================= КОМАНДЫ =================
 
 @dp.message_handler(commands=["start"])
 async def start(msg: types.Message):
-    USERS.add(msg.from_user.id)
-    save_users()
-    await msg.answer("✅ Ты подписан на обновления расписания")
+    subscribers.add(msg.chat.id)
 
-@dp.message_handler(lambda m: m.text.isdigit())
-async def remove_user(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("📄 Последнее расписание", callback_data="last"))
+
+    if msg.chat.id == ADMIN_ID:
+        kb.add(InlineKeyboardButton("🛠 Админ-панель", callback_data="admin"))
+
+    await msg.answer(
+        "✅ Ты подписан на обновления расписаний.\n"
+        "Новое PDF придёт автоматически.",
+        reply_markup=kb
+    )
+
+    if pdf_history:
+        await bot.send_document(msg.chat.id, open(pdf_history[-1], "rb"))
+
+
+@dp.callback_query_handler(lambda c: c.data == "last")
+async def last_pdf(cb: types.CallbackQuery):
+    if not pdf_history:
+        await cb.answer("Нет данных", show_alert=True)
         return
-    uid = int(msg.text)
-    if uid in USERS:
-        USERS.remove(uid)
-        save_users()
-        await msg.answer("✅ Пользователь удалён")
+    await bot.send_document(cb.message.chat.id, open(pdf_history[-1], "rb"))
 
-# ================== ЗАПУСК ==================
+
+@dp.callback_query_handler(lambda c: c.data == "admin")
+async def admin_panel(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        return
+
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("👥 Пользователи", callback_data="users"))
+    kb.add(InlineKeyboardButton("📂 История PDF", callback_data="history"))
+
+    await cb.message.answer("🛠 Админ-панель", reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data == "users")
+async def users(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        return
+    await cb.message.answer(f"👥 Подписчиков: {len(subscribers)}")
+
+
+@dp.callback_query_handler(lambda c: c.data == "history")
+async def history(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        return
+
+    if not pdf_history:
+        await cb.message.answer("История пуста")
+        return
+
+    for path in pdf_history[-5:]:
+        await bot.send_document(ADMIN_ID, open(path, "rb"))
+
+
+# ================= ЗАПУСК =================
+
+async def on_startup(dp):
+    asyncio.create_task(checker())
+    print("Bot started")
+
 
 if __name__ == "__main__":
-    dp.loop.create_task(checker())
-    executor.start_polling(dp, skip_updates=True)
-
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
